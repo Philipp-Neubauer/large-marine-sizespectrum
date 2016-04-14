@@ -1,6 +1,8 @@
 # History files
 .Rhistory
 .Rapp.history
+*.zip
+Size\ based\ models\ LMEs/
 
 # Session Data files
 .RData
