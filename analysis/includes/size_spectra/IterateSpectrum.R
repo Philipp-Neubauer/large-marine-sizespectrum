@@ -49,9 +49,6 @@ IterateSpectrum <- function(param, S){
    S <- list()
  }
 
-source("makegrid.r")
-source('gradient.r')
-source('fishing.r')
 # ---------------------------------------------------------
   # Set up grid for weights (w)
 # ---------------------------------------------------------

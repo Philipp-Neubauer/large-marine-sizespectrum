@@ -1,7 +1,4 @@
 baseparameters  = function(wInf,kappa,h){ 
-source('makegrid.R')
-source('calcequ.R')
-  
 
 
 beta <- 100;

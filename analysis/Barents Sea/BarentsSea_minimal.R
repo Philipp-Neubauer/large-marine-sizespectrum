@@ -1,11 +1,13 @@
 # Size based calibration to large marine ecosystems
 # Calibrate to the Barents
 
-source('load_files.R')
+files <- paste0('../includes/size_spectra/', dir('../includes/size_spectra'))
+sapply(files, source)
+
+db <- '../includes/RAM/'
 # Barents sea
 
-
-state <- Biomass_from_RAMv3(LMEnumber =20, dir)
+state <- Biomass_from_RAMv3(LMEnumber =20, db)
 units <- state[[2]]
 state <- state[[1]]
 
@@ -53,9 +55,7 @@ rmidx <- which(is.na(state$SSBio) == 0)
 state <- state[rmidx,] 
 state$F0[which(is.na(state$F0) == 1)] <- state$Catch[which(is.na(state$F0) == 1)]/
   state$SSBio[which(is.na(state$F0) == 1)]
-source('baseparameters.R')
-source('IterateSpectrum.R')
-rm(param)
+
 h <- 15
 
 param <- baseparameters(state$wInf, kappa = 5e5, h = h) # Kappa estimated from LME 

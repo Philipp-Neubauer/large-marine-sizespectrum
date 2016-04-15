@@ -7,73 +7,79 @@ Biomass_from_RAMv3 = function(LMEnumber, dir){
   
   ## Indirect effects of fishing marine ecosystems 
   require('RODBC')
-  require(rfishbase)
-  require(RCurl)
-  require(XML)
-  require(grid)
-  require(gridExtra)
-  require(ggplot2)
-  require(rgdal)
+  #require(rfishbase)
+  #require(RCurl)
+  #require(XML)
+  #require(grid)
+  #require(gridExtra)
+  #require(ggplot2)
+  #require(rgdal)
   
-  
-  
-  source("getFishIndices.R")
   # load The ram database into R 
 
   #db <- "C:/Users/s102045/Dropbox/Ocean life/Size based models in R/RLSADBv3.accdb"
   #db_old <- "C:/Users/s102045/Downloads/RAM-Legacy-v1.0.accdb" # Old RAM database has LME information 
   
-  db <- paste(dir,"RLSADBv3.accdb", sep="/")
-  db_old <- paste(dir,"RAM-Legacy-v1.0.accdb", sep = "/") # Old RAM database has LME information 
-  
-  # load the new RAM legacy database 
-  
-  con2 <- odbcConnectAccess2007(db) #  EUREKA! 
-  con_old <- odbcConnectAccess2007(db_old)
-  
-  # Get the table headers 
-  info <- sqlTables(con2) # Find tables in the ramdatabase 
-  info <- info$TABLE_NAME
-  
-  
-  
-  assessment <- sqlFetch(con2,'assessment')
-  lmes <- sqlFetch(con_old,'lmerefs')
-  lmetostocks <- sqlFetch(con_old,'lmetostocks')
-  area <- sqlFetch(con2,'area')
-  # To get the values out of each table use the "sqlFetch" command
-  
-  
-  ts_values <- sqlFetch(con2,'timeseries_values_views')
-  ts_values[19522:19553,]$TC <- NA # Catch is in NUMBERS
-  ts_values[19522:19553,]$SSB <- ts_values[19522:19553,]$SSB*2 # Only females in asssessment
-  
-  bioparams <- sqlFetch(con2,'bioparams')
-  ts_units <- sqlFetch(con2,'timeseries_units_views')
-  stock <- sqlFetch(con2,'stock')
-  rp <- sqlFetch(con2,'bioparams_values_views')
-  tsmetrics <- sqlFetch(con2,'tsmetrics')
-  #fishnames <- unique(fishnames) # Only find the unique names 
-  timeseries <- sqlFetch(con2,'timeseries')
-  
-  
-  
-  lmenum <- LMEnumber # LME number, used to find the data from the specific lme 
-  
-  df_ref <- read.table('Reference_points_RAMv3.csv')
-  
-  # Just remove the secondary things 
-  lmetostocks <- lmetostocks[lmetostocks$STOCKTOLMERELATION == "primary",]
-  lmetostocks$STOCKID <- as.character(lmetostocks$STOCKID)
-  lmetostocks$STOCKID[113] <- "WHITNS-VIId" # disagreement between RAM versions
-  stock$commonname <- as.character(stock$commonname)
+  if(.Platform$OS.type == 'unix'){
+    require(Hmisc)
+    #need mdb - install instructions under linux are here
+    old_db <- Hmisc::mdb.get(paste0(db,"RAM-Legacy-v1.0.accdb"))
+    attach(old_db)
+    full_db <- Hmisc::mdb.get(paste0(db,"RLSADBv3.accdb"))
+    attach(full_db)
+    
+    ts_values <- timeseries_values_views
+    ts_units <- timeseries_units_views
+  } else {
+    db <- paste(dir,"RLSADBv3.accdb", sep="/")
+    db_old <- paste(dir,"RAM-Legacy-v1.0.accdb", sep = "/") # Old RAM database has LME information 
+    
+    # load the new RAM legacy database 
+    
+    con2 <- odbcConnectAccess(db) #  EUREKA! 
+    con_old <- odbcConnectAccess2007(db_old)
+    
+    # Get the table headers 
+    info <- sqlTables(con2) # Find tables in the ramdatabase 
+    info <- info$TABLE_NAME
+    
+    
+    
+    assessment <- sqlFetch(con2,'assessment')
+    lmes <- sqlFetch(con_old,'lmerefs')
+    lmetostocks <- sqlFetch(con_old,'lmetostocks')
+    area <- sqlFetch(con2,'area')
+    # To get the values out of each table use the "sqlFetch" command
+    
+    
+    ts_values <- sqlFetch(con2,'timeseries_values_views')
+   
+    bioparams <- sqlFetch(con2,'bioparams')
+    ts_units <- sqlFetch(con2,'timeseries_units_views')
+    stock <- sqlFetch(con2,'stock')
+    rp <- sqlFetch(con2,'bioparams_values_views')
+    tsmetrics <- sqlFetch(con2,'tsmetrics')
+    #fishnames <- unique(fishnames) # Only find the unique names 
+    timeseries <- sqlFetch(con2,'timeseries')
+    
+    
+    
+    lmenum <- LMEnumber # LME number, used to find the data from the specific lme 
+  }
+    df_ref <- read.table(paste0(db,'Reference_points_RAMv3.csv'))
+    
+    # Just remove the secondary things 
+    lmetostocks <- lmetostocks[lmetostocks$STOCKTOLMERELATION == "primary",]
+    lmetostocks$STOCKID <- as.character(lmetostocks$STOCKID)
+    lmetostocks$STOCKID[113] <- "WHITNS-VIId" # disagreement between RAM versions
+    stock$commonname <- as.character(stock$commonname)
   stock$commonname[1] <- "Acadian Redfish" # Fix with capital letter
   # fix difference in capital letters
   stock$commonname[which(stock$commonname == "Yellowtail flounder")] <- "Yellowtail Flounder" 
   # Move down to unique stock ID's 
   
   
-  LMEidx <- which(lmetostocks$LME_NUMBER == lmenum)
+  LMEidx <- which(lmetostocks$LME == lmenum)
   fishnamesLME <- lmetostocks$STOCKID[LMEidx]
   
   if (length(fishnamesLME) == 0){
@@ -96,6 +102,10 @@ Biomass_from_RAMv3 = function(LMEnumber, dir){
   # Find remaining species in the specified areas 
   Areas <- unique(AreaCode)
   
+ # ts_values[19522:19553,]$TC <- NA # Catch is in NUMBERS
+#  ts_values[19522:19553,]$SSB <- ts_values[19522:19553,]$SSB*2 # Only females in asssessment
+  
+  
   SpeciesUnique <- list()
   for (i in 1:length(Areas)){
     idxtmp <- stock[which(as.character(stock$areaid) == Areas[i]),]
@@ -103,6 +113,7 @@ Biomass_from_RAMv3 = function(LMEnumber, dir){
     
     
   }
+  
   SpeciesUnique <- unique(unlist(SpeciesUnique,recursive = FALSE))
   fishnamesLME <- SpeciesUnique
   
@@ -135,8 +146,8 @@ Biomass_from_RAMv3 = function(LMEnumber, dir){
     #  species[i] <-list(ts_values[idxtmp,])
     tmpidx <- which(stock$stockid == as.character(fishnamesLME[i]))
     if (length(tmpidx) > 0){
-      OrgNames[i] <- as.character(stock$commonname[tmpidx])}
-    else{
+      OrgNames[i] <- as.character(stock$commonname[tmpidx])
+      }else{
       OrgNames[i] <- NA}
   }
   #RPd
