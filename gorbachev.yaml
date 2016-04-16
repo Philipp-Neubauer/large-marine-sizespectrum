@@ -1,0 +1,2 @@
+docker: dragonfly/sizespectra
+cpus: 2
