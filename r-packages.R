@@ -4,7 +4,7 @@ r["CRAN"] <- "http://cran.stat.auckland.ac.nz"
 options(defaultPackages = c(old, "MASS"), repos = r)
 
 packages <- c(
-  "mizer"
+  "mizer","Hmisc","RODBC"
 )
 
 for (p in packages) {

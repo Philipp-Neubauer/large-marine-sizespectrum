@@ -1,4 +1,4 @@
-Biomass_from_RAMv3 = function(LMEnumber, dir){
+Biomass_from_RAMv3 = function(lmenum, dir){
   # Takes input LMEnumber and dir, where dir is the working directory and LMENumber is the number of the large marine ecosystem in the ram database
   
   # Get the biomass distribution currently (or from some particular year, maybe mean?) 
@@ -62,9 +62,6 @@ Biomass_from_RAMv3 = function(LMEnumber, dir){
     #fishnames <- unique(fishnames) # Only find the unique names 
     timeseries <- sqlFetch(con2,'timeseries')
     
-    
-    
-    lmenum <- LMEnumber # LME number, used to find the data from the specific lme 
   }
     df_ref <- read.table(paste0(db,'Reference_points_RAMv3.csv'))
     
