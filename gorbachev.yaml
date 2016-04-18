@@ -1,2 +1,2 @@
-docker: dragonfly/sizespectra
+docker: mmmmk/size-spectra-docker
 cpus: 2
