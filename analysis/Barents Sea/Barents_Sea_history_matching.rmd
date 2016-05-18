@@ -1,0 +1,327 @@
+---
+title: "Emulating trait-based models 3: Barents Sea"
+author: "Philipp Neubauer"
+date: "09/11/2015"
+output: md_document
+---
+
+# Emulating trait-based models 3: Barents Sea
+
+
+```{r preamble,echo=F,message=F,results='hide'}
+#require("mizer")
+require("parallel")
+require("ggplot2")
+require(dplyr)
+require(knitr)
+opts_chunk$set(cache=TRUE, autodep=TRUE,message=F,warning = F)
+source("../includes/GP_emulators/helper_funcs.R")
+```
+
+## Setting up a trait based model
+
+I will use the mizer package to set up a trait based model, and estimate its (active) parameters. The mizer vignette provides a convenient reminder how to set this up:
+
+```{r simulation, warning=FALSE,message=FALSE}
+no_sp = 10
+min_w_inf <- 10
+max_w_inf <- 1e5
+w_inf <- 10^seq(from=log10(min_w_inf), to = log10(max_w_inf), length=10)
+knife_edges <- w_inf * 0.05
+
+truth <- set_trait_model(no_sp = no_sp, 
+                         h=40,
+                         kappa = 0.01,
+                         r_pp = 10,
+                         beta = 300,
+                         sigma= 1.3,
+                         min_w_inf = min_w_inf, 
+                         max_w_inf = max_w_inf,
+                         knife_edge_size = knife_edges)
+  
+sim <- project(truth, t_max = 100, dt=0.2, effort = 0.4)
+
+plot(sim)
+
+```
+
+Looks like this arbitrary trait based model has converged to a stable solution. I now use the mean biomass over the last 25 years as data for the calibration (though I could use just the last year, or some other variables).
+
+
+``` {r data}
+
+biom <- colMeans(getBiomass(sim)[75:100,])
+
+```
+
+## Building an emulator
+
+In this example, I chose to use just three ecological parameters (h - the maximum food intake rate, sigma - the width of the prey selection kernel and r_pp - the primary productivity) as unknowns, keeping all other parameters fixed to provide a tractable start. Some initial exploration with the trait based model suggested that these variables had disproportionate effects - although other variables such as k0 - the multiplier on maximum recruitment - and beta (the mean of the prey selection kernel) should be considered uncertain in the future. Furthermore, some parameters, such as h and k0 may well cay among species, so could be considered as on a per-species basis in the future. But for now, I focus on the three parameters above to see if I can get a workable example. Here's a start, making a first set of training data for the emulator by running the size-based model on a grid of parameter values.:
+
+```{r make training data}
+
+param$kappaPP
+param$h
+
+hminmax <- rbind(param$h/5,param$h*5)
+Rminmax <- rbind(param$Rmax/100,param$Rmax*100)
+
+minmax <- data.frame(hminmax,
+                     Rminmax,
+                     kappa = c(kappaNew/10,kappaNew*10)
+                     )
+    
+LHC <- latin.hypercube(300,13)
+
+LHC_in <- data.frame(sapply(1:ncol(LHC), function(x)
+  LHC[,x]*diff(minmax[,x])+minmax[1,x]))
+
+colnames(LHC_in) <- c(sprintf('h%d',1:6),sprintf('Rmax%d',1:6),'kappa')
+#plot(LHC_in)
+
+pred_list <- split(LHC_in,1:nrow(LHC_in))       
+system.time( simdat <- parallel::mclapply(pred_list,
+                                          run_nis_spec,
+                                          mc.cores = 4))
+simdats <-  lapply(simdat,function(pred){
+  if(is.numeric(pred[1])) pred
+  else rep(NA,6)})
+
+sim_data <- t(do.call('cbind',simdats))
+
+
+```
+
+Here I chose to right away get rid of some regions of parameter space (i.e., calculate the implausibility  [@andrianakis:bayesian:2015] based on simulation runs alone.). Since I do not use an emulator here, and the simulations are deterministic, I need to consider model uncertainty as the main source of uncertainty. Model uncertainty is the uncertainty due to model mis-specification and is notoriously hard to pin down. Here I set it very conservatively to a third of the variance of the simulation outputs over a wide range of input parameters. This should ensure that I only discard parameter values that produce really absurd outputs (i.e., extinction of some species). the implausibility theshold is set at 10, which is the approximate value for a Chi-squared dsitribution with 10 degrees of freedom. For a more detailed intro to Implausibility and its application in the analysis of simulation outputs, see @andrianakis:bayesian:2015 and references therein.
+
+```{r check first outputs, Wave 0 of checking for predictions that are wayy off}
+naset <- which(apply(sim_data,1,function(x) any(is.na(x) | x<1000)))
+sim_data <- sim_data[-naset,]
+biom <- state$SSBio
+svar <- solve(var(sim_data,na.rm = T)/4) 
+
+LHC_in$p_reg  <- do.call('c', lapply(simdats,function(pred){
+  t(biom - pred) %*% 
+    svar %*% 
+    (biom - pred)
+})) > qchisq(0.95,13)
+
+mpreds <- reshape2::melt(LHC_in)
+
+ggplot(mpreds) + 
+  facet_grid( p_reg ~ variable,scales = "free") + 
+  geom_bar(aes(x=value)) + 
+  theme_bw() + 
+  xlab('Parameter')
+
+```
+
+I now use the remaining points that were not discarded (there aren't many!) to define a set of point to build the emulator on. This avoids training the emulator on a set of parameters and outputs that give widely different answers and dominate the model fit, but lead to poor predictions in the area of interest (i.e., parameters that make sense). The new set is made by drawing from a multivariate normal distribution around the remaining points to explore the space around those points.
+
+```{r update training set}
+
+leftovers <- LHC_in[!LHC_in$p_reg,1:13]
+oc = round(500/nrow(leftovers))
+isd <- cov(leftovers)
+
+# draw from mv norm around leftover values
+new_pred_pre_list_jitter <- t(apply(repmat(leftovers,oc,1),1,function(x) t(mvtnorm::rmvnorm(1,x,0.05*isd))))
+
+#remove values <0
+new_pred_pre_list_jitter <- new_pred_pre_list_jitter[(apply(new_pred_pre_list_jitter,1,function(x) !any(x<=0))),]
+
+colnames(new_pred_pre_list_jitter) <- colnames(LHC_in)[1:13]
+
+mp <- reshape2::melt(new_pred_pre_list_jitter)
+ggplot(mp,aes(x=value)) + 
+  geom_histogram(aes(x=value)) + 
+  facet_wrap(~Var2,scales='free') + 
+  theme_bw()+ 
+  xlab('Parameter')
+```
+
+Running the simulator to make a training set for the emulator:
+
+```{r run training set}
+                        
+new_pred_list <- split(data.frame(new_pred_pre_list_jitter),
+                       1:nrow(new_pred_pre_list_jitter))   
+
+system.time( new_simdat <- parallel::mclapply(new_pred_list,
+                                              run_nis_spec,
+                                              mc.cores = 4))
+
+```
+
+I throw out some combinations of parameters that lead to collapse. In a full history matching exerciser I wouldn't want to do this since they hold information about areas of poor fit to the data - but here I use it to show that the emulator can indeed give OK (and fast!) predictions of the size spectrum in the parameter space of interest.
+
+```{r subset simdata}
+new_sim_data <- t(do.call('cbind',new_simdat))
+
+apply(new_sim_data,2,quantile)
+
+pred_pre_list_df <- data.frame(new_pred_pre_list_jitter)
+pred_pre_list_df$p_reg <- apply(new_sim_data,1,function(x) any(x<(min(biom)/10^4)))
+
+mpreds <- reshape2::melt(pred_pre_list_df)
+
+ggplot(mpreds) + 
+  facet_grid( p_reg ~ variable,scales = "free") + 
+  geom_bar(aes(x=value)) + 
+  theme_bw() + 
+  xlab('Parameter')
+
+
+keepers <-  !is.na(pred_pre_list_df$p_reg) & !(pred_pre_list_df$p_reg)
+
+sim_data <- new_sim_data[keepers,]
+
+sim_data <- unique(sim_data)
+
+pred_pre_list <- unique(new_pred_pre_list_jitter[keepers,])
+
+```
+
+Time to think about how to emulate this model. In general, species are linked in the model, so uni-variate emulation seems like the wrong approach. An alternative is multivariate emulation. In particular, the method described in @rougier:2008:efficient may be appropriate here since we are working with a standard matrix of outputs. The method assumes that the predictions can be decomposed into a regression in the inputs and a regression in the outputs (i.e., the size classes).
+
+First, source Johnathan Rougiers code: 
+```{r source OPE code}
+
+source("../includes/GP_emulators/OPE.R")
+
+```
+
+For the method to work, we need to specify regressors on the inputs and outputs, along with a covariance, computed from the inputs and at points where the simulator is evaluated (i.e., where we calculate the biomass - at w\_inf for each species). I use the same for inputs and outputs here as I have little prior idea. For the mean part of the GP regression, a second order polynomial seems like a relatively flexible start. Tor the covariance, I will start with an exponential covariance for simplicity. Later, I will try to learn the scale parameters of both matrices in order to optimise the emulator. The functions for means, variances and other helper functions are defined [here](2015-11-09-MV-emulating-size-based-models_files/helper_funcs.R)
+
+I can now define a GP emulator:
+
+```{r define OPE}
+  # stdise is a normal centering and fixing to [-1,1], whereas stdise_wrt(x,y) is with respect to the mean and max of y 
+
+
+ins <- stdise(as.matrix(pred_pre_list))
+
+outs <- stdise(log(sim_data))
+
+scales <- 1/(0.125*as.vector(diff(apply(ins,2,range))))^2
+out_grid <- seq(from=log10(min(state$wInf)), to = log10(max(state$wInf)), length=10)
+out_grid <- (out_grid-mean(out_grid))/sd(out_grid)
+
+OPE <- define_OPE(c(1,1*(scales)),
+                  inData = ins,
+                  outGrid = out_grid,
+                  outData = outs)
+ 
+cuts <- cut(1:nrow(ins_test),nrow(ins_test)/2)
+ins_test_sp <- split(data.frame(ins_test), cuts)
+
+test_pred <- mclapply(ins_test_sp, 
+                      function(ins) emulate(ins,
+                                            OPE,
+                                            split=F,
+                                            rev_std_out=T,
+                                            rev_std_data = log(sim_data_train)),
+                      mc.cores = 4)
+
+test_pred <- do.call('rbind',test_pred)
+
+```
+
+### How well does the emulator perform?
+
+For these inputs, it seems as though the emulator does well in interpolating the results from the size-spectrum for most of the test set:
+
+```{r testing}
+
+plot(exp(test_pred$mu),as.vector(t((sim_data_test))),xlab='Predictions',ylab='Simulations')
+abline(a=0,b=1)
+summary(lm(exp(test_pred$mu)~0+as.vector(t((sim_data_test)))))
+
+```
+
+### Improving the emulator
+
+It might be possible to get even better prediction by adjusting the length scale of the GP covariances. For this, I use a function to optimise the length scales based on the GP marginal likelihoods, and then define the new emulator by those length scales:
+
+```{r optimise OPE,results='hide',message=F}
+
+opt_OPE <- optim(c(1,(scales)),
+      define_OPE,
+      inData = stdise(as.matrix(pred_pre_list)),
+      outGrid = out_grid,
+      outData = stdise(log(sim_data)),
+      opt=T,
+      control = list(fnscale=-1,
+                     trace = 100,
+                     reltol = 1e-6))
+
+```
+The new emulator with optimised GP length scales is now:
+
+```{r test refined OPE}
+OPE_opt <- define_OPE(opt_OPE$par,
+                      inData = stdise(as.matrix(pred_pre_list)),
+                      outGrid = out_grid,
+                      outData = stdise(log(sim_data)))
+
+OPE_opt_test <- adjustOPE(OPE_opt, R = ins, Y = outs)
+
+
+test_pred <- mclapply(ins_test_sp, 
+                      function(ins) emulate(ins,
+                                            OPE_opt_test,
+                                            split=F,
+                                            rev_std_out=T,
+                                            rev_std_data = log(sim_data_train)),
+                      mc.cores = 4)
+
+test_pred <- do.call('rbind',test_pred)
+
+plot(exp(test_pred$mu),as.vector(t(sim_data_test)),xlab='Predictions',ylab='Simulations')
+abline(a=0,b=1)
+summary(lm(exp(test_pred$mu)~0+as.vector(t(sim_data_test))))
+
+```
+
+Indeed, now 75% of predictions are within ```quantile(abs((exp(test_pred$mu)-as.vector(t(sim_data_test)))/as.vector(t(sim_data_test)))*100)[4]```% of the simulations.
+
+## Can the emulator emulate the size-spectrum response?
+
+To test the emulator, its worthwhile testing how well the emulator predicts the marginal responses to changes in the inputs:
+
+```{r test opt_OPT response}
+in_df <- data.frame(pred_pre_list)
+
+pred_size <- 8
+
+testset1 <- data.frame(h=seq(min(in_df$h),max(in_df$h),l=pred_size),
+                       r_pp = 10,
+                       sigma= 1.3)
+
+test_em(testset1, 
+        OPE_opt, 
+        'h')
+
+testset2 <- data.frame(h=40,
+                       r_pp = 10,
+                       sigma= seq(min(in_df$sigma),max(in_df$sigma),l=pred_size))
+
+test_em(testset2, 
+        OPE_opt, 
+        'sigma')
+
+testset3 <- data.frame(h=40,
+                       r_pp = lseq(quantile(in_df$r_pp,0.05),quantile(in_df$r_pp,0.95),l=pred_size),
+                       sigma= 1.3)
+
+test_em(testset3, 
+        OPE_opt, 
+        'r_pp')
+
+```
+
+This looks pretty promising! Especially given a big caveats here: the parameter sets over which these marginal responses were estimated may not all be plausible. However, I also removed some implausible inputs further up to improve model fits in relevant regions - so I cheated a bit. But all in all this looks like a promising way forward, and I will follow this up with a more elaborate example of emulation and history matching next.
+
+
+## References
+<br>

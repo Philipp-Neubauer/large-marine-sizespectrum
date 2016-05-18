@@ -1,6 +1,6 @@
 RmaxCalc <- function(state_new,param,S0){
   
-source('load_files.R')
+#source('load_files.R')
     #
 library(stats4)
 

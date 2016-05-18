@@ -18,6 +18,29 @@ run_SS_sim <- function(inputs){
   this.biom
 }
 
+run_nis_spec <- function(x) {
+  
+  param = baseparameters(state$wInf,
+                         x$kappa,
+                         h = as.numeric(x[grepl('\\h',names(x))]))
+  cV <- 1/mean(h,na.rm=T)
+  param$v <- param$h*cV
+  param$F0 <- state$F0
+  param$fishing <- "Trawl"
+  param$tEnd <- 120
+  param$nF <- 0.1
+  param$Rmax =  as.numeric(x[grepl('Rmax',names(x))])
+  SF <- IterateSpectrum(param, S=NA)
+  tEnd <- param$tEnd/param$dt
+  SSB <- calcSSB(param,SF,tEnd)
+  Biomass <- SF$Biomass[tEnd,]
+  
+  SSBio <- matrix(NA,param$nSpecies)
+  SSBio[state$totFlag == 0] <- SSB[state$totFlag == 0]
+  SSBio[is.na(SSBio)] <- Biomass[which(is.na(SSBio) == 1)]
+  SSBio
+}
+
 run_SS_sim_comp <- function(inputs){
   this.setup <- set_trait_model(no_sp = no_sp, 
                                 r_pp = inputs$r_pp,
