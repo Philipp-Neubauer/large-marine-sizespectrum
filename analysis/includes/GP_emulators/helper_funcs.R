@@ -18,12 +18,12 @@ run_SS_sim <- function(inputs){
   this.biom
 }
 
-run_nis_spec <- function(x) {
+run_nis_spec <- function(x, state) {
   
   param = baseparameters(state$wInf,
                          x$kappa,
                          h = as.numeric(x[grepl('\\h',names(x))]))
-  cV <- 1/mean(h,na.rm=T)
+  cV <- 1/mean(param$h,na.rm=T)
   param$v <- param$h*cV
   param$F0 <- state$F0
   param$fishing <- "Trawl"
@@ -97,7 +97,7 @@ input_reg <- function(inputs) {
 
 
 output_reg <- function(outputs) {
-  out <- cbind(1,outputs,outputs^2,outputs^3)
+  out <- cbind(1,outputs,outputs^3)
   rownames(out) <- sprintf('outputs %d',1:nrow(as.matrix(outputs)))
   as.matrix(out)
 }
@@ -105,22 +105,22 @@ output_reg <- function(outputs) {
 
 require(emulator)
 
-input_var <- function(inputs,finputs=NULL) {
-  cmat <- corr.matrix(inputs,yold=finputs,scales=rep(1,ncol(inputs)))
+input_var <- function(inputs,finputs=NULL,scales) {
+  cmat <- corr.matrix(inputs,yold=finputs,scales=scales)
   if(!is.null(finputs)) cmat <- t(cmat)
   cmat
 }
 
 
-define_OPE <- function(scales, inData, outGrid, outData, opt=F){
+define_OPE <- function(outscale,inscales, inData, outGrid, outData, opt=F){
   
   input_var <- function(inputs,finputs=NULL) {
-    cmat <- corr.matrix(inputs,yold=finputs,scales=exp(scales[2:(ncol(inputs)+1)]))
+    cmat <- corr.matrix(inputs,yold=finputs,scales=inscales)
     if(!is.null(finputs)) cmat <- t(cmat)
     cmat
   }
   
-  output_var <- corr.matrix(as.matrix(outGrid),scales=exp(scales[1]))
+  output_var <- corr.matrix(as.matrix(outGrid),scales=outscale)
   output_regs <- output_reg(outGrid)
   
   vr <- ncol(input_reg(inData))
@@ -165,6 +165,31 @@ emulate <- function(ins,emulator,split=F,rev_std_out=T,rev_std_data=NULL){
   if (split) out <- split(out,as.factor(out$ind))
  
   out
+}
+
+reshape_preds <- function(pred){
+  reshape2:::melt.list(pred,level = 1,id.vars = "ind") %>% 
+    mutate(L1=as.numeric(L1),
+           Ind = paste(L1,ind,sep='-')) %>% 
+    group_by(Ind,variable) %>% 
+    mutate(Species = 1:n()) %>% 
+    ungroup() %>%
+    select(L1,ind,Species,Ind,variable, value) %>% 
+    arrange(L1,ind,Species) %>%
+    tidyr::spread(variable,value) %>% 
+    select(L1,ind,Species,Ind,mu,Sigma) %>% 
+    arrange(L1,ind,Species)
+}
+
+get_impl <- function(prd, bioms, Vobs, Vdiscr) {
+  
+  prd %>% 
+    group_by(L1,ind) %>% 
+    summarise(impl = t(bioms-mu)%*%solve(Vobs+diag(Sigma))%*%(bioms-mu)) %>%
+    ungroup %>%
+    select(impl) %>%
+    unlist() %>% as.vector()
+  
 }
 
 #' Test marginal response of the emulator given a testset

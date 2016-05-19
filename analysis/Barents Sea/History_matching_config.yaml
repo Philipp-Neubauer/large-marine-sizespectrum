@@ -1,0 +1,11 @@
+nspec: 6
+
+waves:
+  - wave: 0
+    sims: 500
+
+  - wave: 1
+    sims: 100
+    preds: 10000
+  
+  

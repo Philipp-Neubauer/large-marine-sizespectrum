@@ -16,103 +16,175 @@ require(dplyr)
 require(knitr)
 opts_chunk$set(cache=TRUE, autodep=TRUE,message=F,warning = F)
 source("../includes/GP_emulators/helper_funcs.R")
-```
-
-## Setting up a trait based model
-
-I will use the mizer package to set up a trait based model, and estimate its (active) parameters. The mizer vignette provides a convenient reminder how to set this up:
-
-```{r simulation, warning=FALSE,message=FALSE}
-no_sp = 10
-min_w_inf <- 10
-max_w_inf <- 1e5
-w_inf <- 10^seq(from=log10(min_w_inf), to = log10(max_w_inf), length=10)
-knife_edges <- w_inf * 0.05
-
-truth <- set_trait_model(no_sp = no_sp, 
-                         h=40,
-                         kappa = 0.01,
-                         r_pp = 10,
-                         beta = 300,
-                         sigma= 1.3,
-                         min_w_inf = min_w_inf, 
-                         max_w_inf = max_w_inf,
-                         knife_edge_size = knife_edges)
-  
-sim <- project(truth, t_max = 100, dt=0.2, effort = 0.4)
-
-plot(sim)
-
-```
-
-Looks like this arbitrary trait based model has converged to a stable solution. I now use the mean biomass over the last 25 years as data for the calibration (though I could use just the last year, or some other variables).
+files <- paste0('../includes/size_spectra/', dir('../includes/size_spectra'))
+sapply(files, source)
 
 
-``` {r data}
-
-biom <- colMeans(getBiomass(sim)[75:100,])
+config <- yaml::yaml.load_file('History_matching_config.yaml')
 
 ```
 
 ## Building an emulator
 
-In this example, I chose to use just three ecological parameters (h - the maximum food intake rate, sigma - the width of the prey selection kernel and r_pp - the primary productivity) as unknowns, keeping all other parameters fixed to provide a tractable start. Some initial exploration with the trait based model suggested that these variables had disproportionate effects - although other variables such as k0 - the multiplier on maximum recruitment - and beta (the mean of the prey selection kernel) should be considered uncertain in the future. Furthermore, some parameters, such as h and k0 may well cay among species, so could be considered as on a per-species basis in the future. But for now, I focus on the three parameters above to see if I can get a workable example. Here's a start, making a first set of training data for the emulator by running the size-based model on a grid of parameter values.:
+
 
 ```{r make training data}
+load(file='History_matching_start.Rdata')
 
-param$kappaPP
-param$h
+sims=config$waves[[1]]$sims
 
-hminmax <- rbind(param$h/5,param$h*5)
-Rminmax <- rbind(param$Rmax/100,param$Rmax*100)
-
-minmax <- data.frame(hminmax,
-                     Rminmax,
-                     kappa = c(kappaNew/10,kappaNew*10)
+minmax <- data.frame(
+                     kappa = c(param$kappaPP/10,param$kappaPP*10)
                      )
     
-LHC <- latin.hypercube(300,13)
+LHC <- latin.hypercube(sims,1)
 
 LHC_in <- data.frame(sapply(1:ncol(LHC), function(x)
   LHC[,x]*diff(minmax[,x])+minmax[1,x]))
 
-colnames(LHC_in) <- c(sprintf('h%d',1:6),sprintf('Rmax%d',1:6),'kappa')
+LHC_in <- cbind(t(repmat(param$h,1,sims)),t(repmat(param$Rmax,1,sims)),LHC_in)
+
+colnames(LHC_in) <- c(sprintf('h%d',1:config$nspec),sprintf('Rmax%d',1:config$nspec),'kappa')
 #plot(LHC_in)
 
 pred_list <- split(LHC_in,1:nrow(LHC_in))       
 system.time( simdat <- parallel::mclapply(pred_list,
                                           run_nis_spec,
+                                          state=state,
                                           mc.cores = 4))
+
 simdats <-  lapply(simdat,function(pred){
   if(is.numeric(pred[1])) pred
-  else rep(NA,6)})
+  else rep(NA,config$nspec)})
 
 sim_data <- t(do.call('cbind',simdats))
 
 
 ```
 
-Here I chose to right away get rid of some regions of parameter space (i.e., calculate the implausibility  [@andrianakis:bayesian:2015] based on simulation runs alone.). Since I do not use an emulator here, and the simulations are deterministic, I need to consider model uncertainty as the main source of uncertainty. Model uncertainty is the uncertainty due to model mis-specification and is notoriously hard to pin down. Here I set it very conservatively to a third of the variance of the simulation outputs over a wide range of input parameters. This should ensure that I only discard parameter values that produce really absurd outputs (i.e., extinction of some species). the implausibility theshold is set at 10, which is the approximate value for a Chi-squared dsitribution with 10 degrees of freedom. For a more detailed intro to Implausibility and its application in the analysis of simulation outputs, see @andrianakis:bayesian:2015 and references therein.
 
 ```{r check first outputs, Wave 0 of checking for predictions that are wayy off}
-naset <- which(apply(sim_data,1,function(x) any(is.na(x) | x<1000)))
-sim_data <- sim_data[-naset,]
+#naset <- which(apply(sim_data,1,function(x) any(is.na(x) | x<1000)))
+#sim_data <- sim_data[-naset,]
 biom <- state$SSBio
-svar <- solve(var(sim_data,na.rm = T)/4) 
 
-LHC_in$p_reg  <- do.call('c', lapply(simdats,function(pred){
+# observation error - should be set to actual uncertainty, but harder for aggregate term
+Vobs <- diag(biom*0.2)
+Vdiscr <- 0.2*diag(diag(cov(sim_data)))
+
+svar <- solve(Vobs + Vdiscr)
+
+LHC_in$impl  <- do.call('c', lapply(simdats,function(pred){
   t(biom - pred) %*% 
     svar %*% 
     (biom - pred)
-})) > qchisq(0.95,13)
+})) 
 
-mpreds <- reshape2::melt(LHC_in)
+ with(LHC_in,plot(kappa,impl))
+ abline(h=qchisq(0.95,13))
+ 
+LHC_in$preg <- LHC_in$impl < qchisq(0.9999,13)
 
-ggplot(mpreds) + 
-  facet_grid( p_reg ~ variable,scales = "free") + 
-  geom_bar(aes(x=value)) + 
-  theme_bw() + 
-  xlab('Parameter')
+kappas <- LHC_in$kappa[LHC_in$preg]
+
+```
+
+```{r}
+
+sims=config$waves[[2]]$sims
+
+hminmax <- rbind(param$h/2,param$h*2)
+Rminmax <- log(rbind(param$Rmax/100,param$Rmax*100))
+
+minmax <- data.frame(hminmax,
+                     Rminmax,
+                     kappa = c(min(kappas),max(kappas))
+                     )
+    
+LHC <- latin.hypercube(sims,13)
+
+LHC_in2 <- data.frame(sapply(1:ncol(LHC), function(x)
+  LHC[,x]*diff(minmax[,x])+minmax[1,x]))
+
+colnames(LHC_in2) <- c(sprintf('h%d',1:config$nspec),sprintf('Rmax%d',1:config$nspec),'kappa')
+LHC_in2[,grepl('Rmax',colnames(LHC_in2))] <- exp(LHC_in2[,grepl('Rmax',colnames(LHC_in2))])
+#plot(LHC_in2)
+
+pred_list <- split(LHC_in2,1:nrow(LHC_in2))       
+system.time( simdat <- parallel::mclapply(pred_list,
+                                          run_nis_spec,
+                                          state=state,
+                                          mc.cores = 4))
+
+simdats <-  lapply(simdat,function(pred){
+  if(is.numeric(pred[1])) pred
+  else rep(NA,config$nspec)})
+
+sim_data <- t(do.call('cbind',simdats))
+
+plot(LHC_in2$Rmax3,LHC_in2$h3,cex=sim_data[,3]/biom[3])
+points(param$Rmax[3],param$h[3],cex=biom[3]/biom[3],bg='red',col='red',pch=16)
+
+```
+First, source Johnathan Rougiers code: 
+```{r source OPE code}
+
+source("../includes/GP_emulators/OPE.R")
+
+```
+
+I can now define a GP emulator:
+
+```{r define OPE}
+  # stdise is a normal centering and fixing to [-1,1], whereas stdise_wrt(x,y) is with respect to the mean and max of y 
+
+
+ins <- stdise(as.matrix(LHC_in2))
+
+outs <- stdise(log(sim_data))
+bioms<- stdise_wrt(t(as.matrix(log(biom))),log(sim_data))
+
+scales <- (0.125*as.vector(diff(apply(ins,2,range))))^2
+out_grid <- seq(from=log10(min(state$wInf)), to = log10(max(state$wInf)), length=config$nspec)
+out_grid <- (out_grid-mean(out_grid))/sd(out_grid)
+
+OPE <- define_OPE(1000,
+                  rep(0.2,13),
+                  inData = ins,
+                  outGrid = out_grid,
+                  outData = outs)
+ 
+preds <- config$waves[[2]]$preds
+LHC_pred <- latin.hypercube(preds,13)
+
+LHC_pred <- data.frame(sapply(1:ncol(LHC_pred), function(x)
+  LHC_pred[,x]*diff(minmax[,x])+minmax[1,x]))
+
+colnames(LHC_pred) <- colnames(LHC_in2)
+LHC_pred[,grepl('Rmax',colnames(LHC_pred))] <- exp(LHC_pred[,grepl('Rmax',colnames(LHC_pred))])
+
+pred_in <- stdise_wrt(LHC_pred, LHC_in2)
+div=100
+pred_in_list <- split(data.frame(pred_in), rep(seq(1,round(nrow(pred_in)/div)),each=div))
+
+pred <- mclapply(pred_in_list, 
+                      function(ins) emulate(ins,
+                                            OPE,
+                                            split=F,
+                                            rev_std_out=F,
+                                            rev_std_data=log(sim_data)),
+                      mc.cores = 4)
+
+pred[1]
+
+prd <- reshape_preds(pred)
+
+
+  Vobs <- diag(bioms*0.05)
+  
+impl <- get_impl(prd, bioms, Vobs = Vobs, Vdiscr = diag(0.01,6))
+
+```
 
 ```
 
@@ -204,7 +276,7 @@ ins <- stdise(as.matrix(pred_pre_list))
 outs <- stdise(log(sim_data))
 
 scales <- 1/(0.125*as.vector(diff(apply(ins,2,range))))^2
-out_grid <- seq(from=log10(min(state$wInf)), to = log10(max(state$wInf)), length=10)
+out_grid <- seq(from=log10(min(state$wInf)), to = log10(max(state$wInf)), length=6)
 out_grid <- (out_grid-mean(out_grid))/sd(out_grid)
 
 OPE <- define_OPE(c(1,1*(scales)),
@@ -212,8 +284,6 @@ OPE <- define_OPE(c(1,1*(scales)),
                   outGrid = out_grid,
                   outData = outs)
  
-cuts <- cut(1:nrow(ins_test),nrow(ins_test)/2)
-ins_test_sp <- split(data.frame(ins_test), cuts)
 
 test_pred <- mclapply(ins_test_sp, 
                       function(ins) emulate(ins,
